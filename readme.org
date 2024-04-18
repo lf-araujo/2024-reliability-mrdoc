@@ -1,0 +1,2180 @@
+#+TITLE: Comparing DoC, MRDoC and MRDoC2 v5
+#+SUBTITLE: Allowing rAC, back to RAM expectation
+#+AUTHOR:lf_araujo
+#+DATE: 2023
+#+PROPERTY: toc:2
+#+OPTIONS: broken-links:t
+#+ATTR_HTML: :width 300
+#+SETUPFILE: "./style/style.theme"
+
+* TOC :toc:
+- [[#setup][Setup]]
+- [[#supporting-functions][Supporting functions]]
+  - [[#maker-for-models-in-variance-components-style][Maker for models in variance components style]]
+- [[#simulation-functions----mrdoc-as-the-data-gen-process][Simulation functions  - MRDoC as the data gen process]]
+- [[#reliability-measurement-error][Reliability, measurement error]]
+- [[#any-bias-with-fixed-re-values][Any bias with fixed re values?]]
+- [[#figure-of-variance-explained-in-statistical-power][Figure of variance explained in statistical power]]
+- [[#data-gen-based-on-each-model][Data gen based on each model]]
+  - [[#reliability-and--measurement-error][Reliability, and  measurement error]]
+  - [[#any-bias-w-fixed-re-values][Any bias w fixed re values]]
+- [[#precision-with-increasing-b1][Precision with increasing b1?]]
+- [[#power-diff-in-different-a][Power diff in different a]]
+- [[#system-information][System information]]
+
+* Setup
+
+#+BEGIN_SRC R :results output none :session R-pw
+
+
+c("ProjectTemplate", "umx", "MASS", "plotly",
+  "lattice", "knitr", "tidyverse", "ggpubr",
+  "rgl", "akima", "foreach", "ggplot2", "doParallel",
+  "MASS", "scales", "RColorBrewer", "ggrepel",
+  "patchwork")|>
+  lapply(function(x) { if (!require(x, character.only = TRUE)) {
+             install.packages(x, dependencies = TRUE, repos = "http://cran.us.r-project.org")
+             library(x)}})
+
+
+
+set.seed(42) # setting seed for stochastic functions
+setwd(here::here()) # needed as we are in /src, in linux here() should be used
+
+## load.project(data_loading=FALSE ) #cache_loading = TRUE) # Loading the project
+## pclean() # cleaning /src folder
+
+# R options
+options(
+  digits = 5, # Only two decimal digits
+  scipen = 999 # Remove scientific notation
+)
+
+# mxOptions
+mxOption(key = "Number of Threads", value = parallel::detectCores())
+mxOption(key = "maxOrdinalPerBlock", value = 200)
+# mxOption(NULL, "Default optimizer", "SQLSP")
+
+## cb_palette <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
+##                 "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+# Add 5 more colorblind friendly colors to cb_palette
+## cb_palette <- c(cb_palette, brewer.pal(7, "Set3"))
+
+cb_palette <-  c("maroon", "red","orange", "gold",
+                               "cadetblue2","dodgerblue",
+                               "blue", "black", "green")
+# Increase this to 15 colors
+cb_palette <- c(cb_palette, brewer.pal(12, "Paired"))
+
+## cb_palette <- c(brewer.pal(12,"Paired"), brewer.pal(3,"Set2"))
+
+theme_luis  <- function() {
+  return_theme <-  ggplot2::theme_bw(12) +
+    ggplot2::theme(
+        panel.border = element_rect(colour = "black"),
+        legend.background = element_rect(linetype = 1, size = 0.2, colour = 1))
+}
+#+END_SRC
+
+
+* Supporting functions
+** Maker for models in variance components style
+
+#+begin_src R :session R-pw :results output none
+mrdoc_maker <- function(type = c("doc", "mrdoc", "mrdoc2")) {
+
+  if (type == "doc") {
+
+  model <- mxModel(
+    "doc",
+    mxModel(
+      "top",
+      mxMatrix(
+        name = "MZmeans", type = "Full", nrow = 1, ncol = 4, free = TRUE,
+        labels = c("muPh1", "muPh2",  "muPh1", "muPh2")
+      ),
+      mxMatrix(
+        name = "DZmeans", type = "Full", nrow = 1, ncol = 4, free = TRUE,
+        labels = c("muPh1", "muPh2", "muPh1", "muPh2")
+      ),
+      mxMatrix(name = "I", type = "Iden", nrow = 2, ncol = 2),
+      umxMatrixFree("B",
+        type = "Full", nrow = 2, ncol = 2,
+        labels = c(
+          NA, "g2",
+          "g1", NA
+        )
+      ),
+      umxMatrix(
+        name = "psi_a", type = "Symm", ncol = 2, nrow = 2, byrow = TRUE,
+        labels = c(
+          "ax2",
+          "ra", "ay2"
+        ),
+        free = c(
+          T,
+          T, T
+        ),
+        values = c(
+          0.1,
+          0.05, 0.1
+        ),
+      ),
+      umxMatrixFree(
+        name = "psi_c", type = "Symm", ncol = 2, nrow = 2,
+        labels = c(
+          "cx2",
+          "rc", "cy2"
+        ),
+      ),
+      umxMatrixFree(
+        name = "psi_e", type = "Symm", ncol = 2, nrow = 2,
+        labels = c(
+          "ex2",
+          "re", "ey2"
+        ),
+      ),
+      umxMatrix(
+        name = "lamba", type = "Diag", nrow = 2, ncol = 2, byrow = TRUE,
+        free = c(F, F), labels = c("σ1", "σ2"),
+        values = c(1, 1)
+      ),
+      mxAlgebra(name = "A", expression = lamba %&% (solve(I - B) %&% psi_a)),
+      mxAlgebra(name = "C", expression = lamba %&% (solve(I - B) %&% psi_c)),
+      mxAlgebra(name = "E", expression = lamba %&% (solve(I - B) %&% psi_e)),
+      mxAlgebra(name = "CovMZ", expression =  rbind(
+        cbind(A + C + E, A + C),
+        cbind(A + C, A + C + E)
+      )),
+      mxAlgebra(name = "CovDZ", expression = rbind(
+        cbind(A + C + E, 0.5 %x% A + C),
+        cbind(0.5 %x% A + C, A + C + E)
+      )),
+      mxAlgebra(
+        name = "VC", expression = cbind(A, C, E, A / (A + C + E), C / (A + C + E), E / (A + C + E)),
+        dimnames = list(
+          rep("VC", 2),
+          rep(c("A", "C", "E", "SA", "SC", "SE"), each = 2)
+        )
+      )
+    ),
+    mxModel(
+      "MZ", mxExpectationNormal("top.CovMZ",
+        means = "top.MZmeans",
+        # dimnames = colnames(dataMz[1:6])
+        dimnames = c('X1','Y1', 'X2','Y2')
+      ),
+     # mxData(dataMz, type = "raw"),
+      mxFitFunctionML()
+    ),
+    mxModel(
+      "DZ", mxExpectationNormal("top.CovDZ",
+        means = "top.DZmeans",
+      #  dimnames = colnames(dataDz),
+        dimnames = c('X1','Y1', 'X2','Y2')
+      ),
+     # mxData(dataDz, type = "raw"),
+      mxFitFunctionML()
+    ),
+    mxFitFunctionMultigroup(c("MZ", "DZ"))
+  )
+
+    model <- umxModify(model, name = "doc", update = c("g2",  "re"), autoRun = F)
+
+  } else if (type == "mrdoc1") {
+
+  model <- mxModel(
+    "mrdoc",
+    mxModel(
+      "top",
+      umxMatrix("filter",
+        type = "Full", nrow = 5, ncol = 6, free = FALSE,byrow = TRUE,
+        values = c(
+          1, 0, 0, 0, 0, 0,
+          0, 1, 0, 0, 0, 0,
+          0, 0, 1, 0, 0, 0,
+          0, 0, 0, 1, 0, 0,
+          0, 0, 0, 0, 1, 0
+        )
+      ),
+      mxMatrix(
+        name = "MZmean", type = "Full", nrow = 1, ncol = 6, free = TRUE,
+        labels = c("muPh1", "muPh2", "muPS1", "muPh1", "muPh2", "muPS1")
+      ),
+      mxAlgebra(name = "MZmeans", expression = MZmean %*% t(filter)),
+      mxMatrix(
+        name = "DZmeans", type = "Full", nrow = 1, ncol = 6, free = TRUE,
+        labels = c("muPh1", "muPh2", "muPS1",  "muPh1", "muPh2", "muPS1")
+      ),
+      mxMatrix(name = "I", type = "Iden", nrow = 3, ncol = 3),
+      umxMatrixFree("B",
+        type = "Full", nrow = 3, ncol = 3,
+        labels = c(
+          NA, "g2", "b1",
+          "g1", NA, "b2",
+          NA, NA, NA
+        )
+      ),
+      umxMatrix(
+        name = "psi_a", type = "Symm", ncol = 3, nrow = 3, byrow = TRUE,
+        labels = c(
+          "ax2",
+          "ra", "ay2",
+          NA, NA, "prsx2"
+        ),
+        free = c(
+          T,
+          T, T,
+          F, F, F
+        ),
+        values = c(
+          0.1,
+          0.05, 0.1,
+          0, 0, 1
+        ),
+      ),
+      umxMatrixFree(
+        name = "psi_c", type = "Symm", ncol = 3, nrow = 3,
+        labels = c(
+          "cx2",
+          "rc", "cy2",
+          NA, NA, NA
+        ),
+      ),
+      umxMatrixFree(
+        name = "psi_e", type = "Symm", ncol = 3, nrow = 3,
+        labels = c(
+          "ex2",
+          "re", "ey2",
+          NA, NA, NA
+        ),
+      ),
+      umxMatrix(
+        name = "lamba", type = "Diag", nrow = 3, ncol = 3, byrow = TRUE,
+        free = c(F, F, T), labels = c("σ1", "σ2", "σ3"),
+        values = c(1, 1, 1)
+      ),
+      mxAlgebra(name = "A", expression = lamba %&% (solve(I - B) %&% psi_a)),
+      mxAlgebra(name = "C", expression = lamba %&% (solve(I - B) %&% psi_c)),
+      mxAlgebra(name = "E", expression = lamba %&% (solve(I - B) %&% psi_e)),
+      mxAlgebra(name = "CovMZ", expression = filter %&% rbind(
+        cbind(A + C + E, A + C),
+        cbind(A + C, A + C + E)
+      )),
+      mxAlgebra(name = "CovDZ", expression = rbind(
+        cbind(A + C + E, 0.5 %x% A + C),
+        cbind(0.5 %x% A + C, A + C + E)
+      )),
+      mxAlgebra(
+        name = "VC", expression = cbind(A, C, E, A / (A + C + E), C / (A + C + E), E / (A + C + E)),
+        dimnames = list(
+          rep("VC", 3),
+          rep(c("A", "C", "E", "SA", "SC", "SE"), each = 3)
+        )
+      )
+    ),
+    mxModel(
+      "MZ", mxExpectationNormal("top.CovMZ",
+        means = "top.MZmeans",
+        dimnames = c('X1','Y1', 'PSx1', 'X2','Y2')
+        # dimnames = colnames(dataMz[1:6])
+      ),
+     # mxData(dataMz, type = "raw"),
+      mxFitFunctionML()
+    ),
+    mxModel(
+      "DZ", mxExpectationNormal("top.CovDZ",
+        means = "top.DZmeans",
+        dimnames = c('X1','Y1','PSx1', 'X2','Y2', 'PSx2')
+      #  dimnames = colnames(dataDz),
+      ),
+     # mxData(dataDz, type = "raw"),
+      mxFitFunctionML()
+    ),
+    mxFitFunctionMultigroup(c("MZ", "DZ"))
+  )
+
+    model <- umxModify(model, name = "mrdoc1", update = c("g2",   "re"), autoRun = F)
+
+  } else if (type == "mrdoc2") {
+
+  model <- mxModel(
+    "mrdoc",
+    mxModel(
+      "top",
+      umxMatrix("filter",
+        type = "Full", nrow = 6, ncol = 8, free = FALSE,byrow = TRUE,
+        values = c(
+          1, 0, 0, 0, 0, 0, 0, 0,
+          0, 1, 0, 0, 0, 0, 0, 0,
+          0, 0, 1, 0, 0, 0, 0, 0,
+          0, 0, 0, 1, 0, 0, 0, 0,
+          0, 0, 0, 0, 1, 0, 0, 0,
+          0, 0, 0, 0, 0, 1, 0, 0
+        )
+      ),
+      mxMatrix(
+        name = "MZmean", type = "Full", nrow = 1, ncol = 8, free = TRUE,
+        labels = c("muPh1", "muPh2", "muPS1", "muPS2", "muPh1", "muPh2", "muPS1", "muPS2")
+      ),
+      mxAlgebra(name = "MZmeans", expression = MZmean %*% t(filter)),
+      mxMatrix(
+        name = "DZmeans", type = "Full", nrow = 1, ncol = 8, free = TRUE,
+        labels = c("muPh1", "muPh2", "muPS1", "muPS2", "muPh1", "muPh2", "muPS1", "muPS2")
+      ),
+      mxMatrix(name = "I", type = "Iden", nrow = 4, ncol = 4),
+      umxMatrixFree("B",
+        type = "Full", nrow = 4, ncol = 4,
+        labels = c(
+          NA, "g2", "b1", "b4",
+          "g1", NA, "b2", "b3",
+          NA, NA, NA, NA,
+          NA, NA, NA, NA
+        )
+      ),
+      umxMatrix(
+        name = "psi_a", type = "Symm", ncol = 4, nrow = 4, byrow = TRUE,
+        labels = c(
+          "ax2",
+          "ra", "ay2",
+          NA, NA, "prsx2",
+          NA, NA, "rf", "prsy2"
+        ),
+        free = c(
+          T,
+          T, T,
+          F, F, F,
+          F, F, T, F
+        ),
+        values = c(
+          0.1,
+          0.05, 0.1,
+          0, 0, 1,
+          0, 0, 0.05, 1
+        ),
+      ),
+      umxMatrixFree(
+        name = "psi_c", type = "Symm", ncol = 4, nrow = 4,
+        labels = c(
+          "cx2",
+          "rc", "cy2",
+          NA, NA, NA,
+          NA, NA, NA, NA
+        ),
+      ),
+      umxMatrixFree(
+        name = "psi_e", type = "Symm", ncol = 4, nrow = 4,
+        labels = c(
+          "ex2",
+          "re", "ey2",
+          NA, NA, NA,
+          NA, NA, NA, NA
+        ),
+      ),
+      umxMatrix(
+        name = "lamba", type = "Diag", nrow = 4, ncol = 4, byrow = TRUE,
+        free = c(F, F, T, T), labels = c("σ1", "σ2", "σ3", "σ4"),
+        values = c(1, 1, 1, 1)
+      ),
+      mxAlgebra(name = "A", expression = lamba %&% (solve(I - B) %&% psi_a)),
+      mxAlgebra(name = "C", expression = lamba %&% (solve(I - B) %&% psi_c)),
+      mxAlgebra(name = "E", expression = lamba %&% (solve(I - B) %&% psi_e)),
+      mxAlgebra(name = "CovMZ", expression = filter %&% rbind(
+        cbind(A + C + E, A + C),
+        cbind(A + C, A + C + E)
+      )),
+      mxAlgebra(name = "CovDZ", expression = rbind(
+        cbind(A + C + E, 0.5 %x% A + C),
+        cbind(0.5 %x% A + C, A + C + E)
+      )),
+      mxAlgebra(
+        name = "VC", expression = cbind(A, C, E, A / (A + C + E), C / (A + C + E), E / (A + C + E)),
+        dimnames = list(
+          rep("VC", 4),
+          rep(c("A", "C", "E", "SA", "SC", "SE"), each = 4)
+        )
+      )
+    ))
+
+
+     MZ <-    mxModel(
+      "MZ", mxExpectationNormal("top.CovMZ",
+        means = "top.MZmeans",
+        dimnames = c('X1','Y1','PSx1','PSy1', 'X2','Y2')
+        # dimnames = colnames(dataMz[1:6])
+      ),
+     # mxData(dataMz, type = "raw"),
+      mxFitFunctionML()
+    )
+
+    DZ <-     mxModel(
+      "DZ", mxExpectationNormal("top.CovDZ",
+        means = "top.DZmeans",
+        dimnames = c('X1','Y1','PSx1','PSy1', 'X2','Y2', 'PSx2','PSy2')
+      #  dimnames = colnames(dataDz),
+      ),
+     # mxData(dataDz, type = "raw"),
+      mxFitFunctionML()
+    )
+
+    model <- model + MZ + DZ + mxFitFunctionMultigroup(c("MZ", "DZ"))
+
+    model <- umxModify(model, name = "mrdoc2", update = c("b2", "b4"), autoRun = F)
+  }
+
+  return(model)
+}
+
+#+end_src
+
+
+* Simulation functions  - MRDoC as the data gen process
+
+#+begin_src R :session R-pw :results  output none
+
+sim  <- function(b1 = sqrt(.025),
+                 b3 = sqrt(.025),
+                 g1 = sqrt(.020),
+                 g2 = sqrt(.020),
+                 axs = .10,
+                 ays = .10,
+                 cxs = .10,
+                 cys = .10,
+                 ra = .2,
+                 rc = .2,
+                 re = .2,
+                 rf = .2,
+                 b2 = sqrt(.025),
+                 b4 = 0,
+                 Nmz = 1000,
+                 Ndz = 1000,
+                 noC = FALSE,
+                 do_id = FALSE,
+                 Ve_pinned = FALSE,
+                 hp = FALSE,
+                 do_pow = "conor",
+                 group = NULL,
+                 reliability = FALSE,
+                 relx = .10,
+                 rely = .30,
+                 unrelated = FALSE,
+                 printSummary = FALSE,
+                 checkId = FALSE,
+                 fixre = FALSE,
+                 re_test = FALSE,
+                 fixrf = FALSE){
+
+  ## b1 = sqrt(.25)
+  ## b3 = sqrt(.25)
+  ## g1 = sqrt(.20)
+  ## g2 = sqrt(.20)
+  ## axs = .10
+  ## ays = .10
+  ## cxs = .10
+  ## cys = .10
+  ## ra = .25
+  ## rc = .25
+  ## re = .25
+  ## rf = .25
+  ## b2 = 0
+  ## b4 = 0
+  ## Nmz = 1000
+  ## Ndz = 1000
+  ## noC = FALSE
+  ## do_id = FALSE
+  ## Ve_pinned = FALSE
+  ## hp = FALSE
+  ## do_pow = "conor"
+  ## group = NULL
+  ## est_out = TRUE
+  ## relx = .1
+  ## rely = .3
+  ## reliability = TRUE
+  ## unrelated = FALSE
+  ## printSummary = FALSE
+  ## fixre = FALSE
+  ## fixrf = FALSE
+  ## checkId = FALSE
+
+
+  #
+  # parameter
+  #
+
+  cy=cys
+  cx=cxs
+  ay=ays
+  ax=axs
+
+  if (Ve_pinned) {
+    ey = ex = 0.05
+  } else {
+    ey=1-(ays+cys)
+    ex=1-(axs+cxs)
+  }
+
+  bgpars=c(b1,b2, b3,g1,g2)^2
+  if (g1<0) bgpars[4]=-(g1^2)
+  if (g2<0) bgpars[5]=-(g2^2)
+  keep  =  data.frame(true_b1 = bgpars[1], true_b2 = bgpars[2],true_b3 = bgpars[3], true_g1 = bgpars[4], true_g2 = bgpars[5])
+  keep$true_ra = ra
+  keep$true_re = re
+  keep$true_rf = rf
+  keep$true_ay = ay
+  keep$true_ey = ey
+  keep$true_ax = ax
+  keep$true_ex = ex
+  keep$true_cy = cy
+  keep$true_cx = cx
+  keep$true_rc = rc
+  ## keep$true_b2 = b2
+  keep$true_b4 = b4
+
+  if (reliability){keep$reliability = TRUE} else {keep$reliability = FALSE}
+
+
+    Sigma = mrdoc_maker("mrdoc2") |>
+      umxModify(update = c("b1","b3","g1","g2","ax2","ay2",
+                  "cx2","cy2","ex2","ey2","ra","rc","re","rf"),
+                  value = c(b1,b3,g1,g2,axs,ays,
+                  cxs,cys,ex,ey,ra,rc,re,rf),
+                      free = T,
+                      autoRun = FALSE) |>
+      mxGetExpected( "covariances")
+
+  Smz=Sigma$MZ
+  Sdz=Sigma$DZ
+
+    ## v <- 1/sqrt(diag(Smz))
+    ## Smz <- Smz * outer(v,v)
+    ## v <- 1/sqrt(diag(Sdz))
+    ## Sdz <- Sdz * outer(v,v)
+
+  if (reliability == TRUE) {
+
+    Smz=Smz +  diag( diag(Smz)*c(relx, rely, 0,0,relx, rely))
+    Sdz=Sdz + diag(diag(Sdz)*c(relx, rely, 0,0,relx, rely,0,0))
+
+  }
+
+
+
+  ###############################
+  ### DATA GEN ENDS ###
+  ###############################
+
+
+  ###############################
+  ### DOC FROM HERE
+  ###############################
+
+# Generate the doc model then pass the covmx and dz
+  # then run it
+
+ doc = mrdoc_maker(type = "doc")
+
+  meansmz = meansdz =  rep(0,4)
+  names(meansmz) =  names(meansdz) = c("X1", "Y1", "X2", "Y2")
+
+  doc$MZ = doc$MZ +
+    mxData(observed=Smz[c('X1', 'Y1', 'X2', 'Y2'), c('X1', 'Y1', 'X2', 'Y2')],
+           type="cov",  means=meansmz, numObs = 1000)
+
+  doc$DZ = doc$DZ +
+    mxData(observed=Sdz[c('X1', 'Y1', 'X2', 'Y2'), c('X1', 'Y1', 'X2', 'Y2')],
+           type="cov",  means=meansdz, numObs = 1000)
+
+  # Need to set starting values here
+   doc = doc |>
+    umxModify(update = c("g1",
+                         "ax2","ay2","cx2","cy2",
+                         "ex2","ey2","ra","rc"),
+              value = c(g1,ax,ay,cx,cy,ex,ey,
+                        ra,rc),
+              free = T,
+              autoRun = FALSE) |>
+    mxRun()
+
+    if (checkId) {message("doc: "); mxCheckIdentification(doc)$status}
+
+    tmp <- doc |>
+    omxSetParameters(labels = "g1", values = 0, free = F) |>
+    mxRun() |>
+    mxCompare(base = doc)
+
+    keep$doc_ncp <- tmp$diffLL[2]
+    keep$doc_df <- tmp$df[2]
+
+   if (do_pow == "twins") {
+     keep$doc_twins = umxPower(doc,  update = "g1", power = .8)[1]
+   }
+
+   keep <- keep |>
+     bind_cols(
+       tibble(names = summary(doc)$parameters$name,
+                    est = summary(doc)$parameters$Estimate,
+                    se = summary(doc)$parameters$Std.Error) %>%
+             pivot_wider(names_from = "names",
+                         values_from = c("est","se"),
+                         names_glue = "doc_{.name}",
+                         names_sort = TRUE)
+     )
+
+
+
+    ###############################
+    ### MRDOC FROM HERE
+    ###############################
+
+
+  mrdoc = mrdoc_maker(type = "mrdoc1")
+
+  meansmz =   rep(0,5)
+  names(meansmz) =  c("X1", "Y1","PSx1", "X2", "Y2")
+
+  meansdz =   rep(0,6)
+  names(meansdz) =  c("X1", "Y1","PSx1", "X2", "Y2","PSx2")
+
+  mrdoc$MZ = mrdoc$MZ +
+    mxData(observed=Smz[c("X1", "Y1","PSx1", "X2", "Y2"),
+                        c("X1", "Y1","PSx1", "X2", "Y2")],
+           type="cov",  means=meansmz, numObs = 1000)
+
+  mrdoc$DZ = mrdoc$DZ +
+    mxData(observed=Sdz[c("X1", "Y1","PSx1", "X2", "Y2","PSx2"),
+                        c("X1", "Y1","PSx1", "X2", "Y2","PSx2")],
+           type="cov",  means=meansdz, numObs = 1000)
+
+  mrdoc <- mrdoc |>
+    umxModify(update = c("g1","b1","b2",
+               "ax2","ay2","cx2","cy2",
+               "ex2","ey2","ra","rc"),
+              value = c(g1,b1,b2,
+                axs,ays,cxs,cys,
+                ex,ey,ra,rc),
+                     free = T,
+                     autoRun = F) |>
+    mxRun()
+
+    if (checkId) {message("mrdoc: "); mxCheckIdentification(mrdoc)$status}
+
+    tmp <- mrdoc |>
+      omxSetParameters(labels = "g1", values = 0, free = F) |>
+      mxRun() |>
+      mxCompare(base = mrdoc)
+
+
+    keep$mrdoc_ncp <- tmp$diffLL[2]
+    keep$mrdoc_df <- tmp$df[2]
+
+if (do_pow == "twins") {
+     keep$mrdoc_twins = umxPower(mrdoc,  update = "g1", power = .8)[1]
+   }
+
+    keep <- keep |>
+      bind_cols(
+        tibble(names = summary(mrdoc)$parameters$name,
+                    est = summary(mrdoc)$parameters$Estimate,
+                    se = summary(mrdoc)$parameters$Std.Error) %>%
+             pivot_wider(names_from = "names",
+                         values_from = c("est","se"),
+                          names_glue = "mrdoc_{.name}",
+                         names_sort = TRUE)
+      )
+
+    ###############################
+    ### MRDOC ENDS
+    ###############################
+
+
+
+    ###############################
+    ### MRDOC2 FROM HERE
+    ###############################
+
+
+  mrdoc2 = mrdoc_maker(type = "mrdoc2") |>
+    umxModify(update = c("g1","g2","b1","b3",
+                  "ax2","ay2","cx2","cy2",
+                  "ex2","ey2","ra","rc",
+                  "re"),
+              value = c(g1,g2,b1,b3,
+                 axs,ays,cxs,cys,
+                 ex,ey,ra,rc,
+                re),
+              free = T,
+              autoRun = F)
+
+  meansmz =   rep(0,6)
+  names(meansmz) =  c("X1", "Y1","PSx1", "PSy1", "X2", "Y2")
+
+  meansdz =   rep(0,8)
+  names(meansdz) =  c("X1", "Y1","PSx1", "PSy1", "X2", "Y2","PSx2", "PSy2")
+
+##   mxCheckIdentification(mrdoc2)$status
+
+  mrdoc2$MZ = mrdoc2$MZ +
+    mxData(observed=Smz,
+           type="cov",  means=meansmz, numObs = 1000)
+
+  mrdoc2$DZ = mrdoc2$DZ +
+    mxData(observed=Sdz,
+           type="cov",  means=meansdz, numObs = 1000)
+
+
+    mrdoc2 <- mxRun(mrdoc2)
+
+    if (checkId) {message("mrdoc2: "); mxCheckIdentification(mrdoc2)$status}
+
+    tmp <- mrdoc2 |>
+      omxSetParameters(labels = "g1", values = 0, free = F) |>
+      mxRun() |>
+      mxCompare(base = mrdoc2)
+
+
+    keep$mrdoc2_ncp <- tmp$diffLL[2]
+    keep$mrdoc2_df <- tmp$df[2]
+
+
+if (do_pow == "twins") {
+     keep$mrdoc2_twins = umxPower(mrdoc2,  update = "g1", power = .8)[1]
+   }
+
+    keep <- keep |>
+      bind_cols(
+        tibble(names = summary(mrdoc2)$parameters$name,
+                        est = summary(mrdoc2)$parameters$Estimate,
+                        se = summary(mrdoc2)$parameters$Std.Error) %>%
+                pivot_wider(names_from = "names",
+                            values_from = c("est","se"),
+                            names_glue = "mrdoc2_{.name}",
+                            names_sort = TRUE)
+      )
+
+
+
+
+    ###############################
+    ### MRDOC 2 ENDS
+    ###############################
+
+    keep # |>print()
+}
+
+
+#+end_src
+
+* Reliability, measurement error
+
+#+begin_src R :exports both  :session R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores()-1, outfile = "")
+registerDoParallel(cl)
+
+relal <- foreach(g1=c(sqrt(.020),sqrt(.040)), .combine =rbind,
+                  .errorhandling = "remove",
+                  .packages = c("umx", "dplyr",  "tidyr")) %:%
+          # foreach(axs=c(0,.10), .combine =rbind) %:%
+          # foreach(ays=c(0,.10), .combine = rbind) %:%
+          foreach(g2=c(sqrt(.020),sqrt(.040)), .combine =rbind) %:%
+          foreach(b3=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(b1=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          # foreach(re=c(0,.10), .combine =rbind) %:%
+          foreach(ra=c(0, .2), .combine =rbind) %:%
+          foreach(reliability=c(FALSE, TRUE), .combine =rbind) %:%
+          foreach(rc=c(0, .2), .combine =rbind) %dopar% {
+
+   sim(g1=g1,g2=g2,b1=b1, b3=b3, rc=rc, ra =ra,#re=re,
+      reliability = reliability )
+
+}
+
+stopCluster(cl)
+
+#+end_src
+
+#+header: :width 1500 :height 600 :res 110
+#+BEGIN_SRC R :exports both :session R-pw  :results output graphics file :file graphs/reliab.png
+
+relal %>%
+  mutate(reliability = ifelse(reliability == TRUE, "Unreliable", "Reliable")) %>%
+  group_by(reliability) %>%
+  # the below are the  relative biases
+  summarise(
+            mrdoc2_g2 = mean(mrdoc2_est_g2 -  sqrt(true_g2), na.rm = T),
+            mrdoc2_g1 = mean(mrdoc2_est_g1 -  sqrt(true_g1), na.rm = T),
+            mrdoc2_b1 = mean(mrdoc2_est_b1 -  sqrt(true_b1), na.rm = T),
+            mrdoc2_b3 = mean(mrdoc2_est_b3 -  sqrt(true_b3), na.rm = T),
+            mrdoc2_covA = mean(mrdoc2_est_ra -  true_ra, na.rm = T),
+            mrdoc2_covC = mean(mrdoc2_est_rc -  true_rc, na.rm = T),
+            mrdoc2_covE = mean(mrdoc2_est_re -  true_re, na.rm = T),
+            mrdoc2_rf = mean(mrdoc2_est_rf -  true_rf, na.rm = T),
+            mrdoc2_ey2 = mean(mrdoc2_est_ey2 -  true_ey, na.rm = T),
+            mrdoc2_ex2 = mean(mrdoc2_est_ex2 -  true_ex, na.rm = T),
+            mrdoc2_ax2 = mean(mrdoc2_est_ax2 -  true_ax, na.rm = T),
+            mrdoc2_ay2 = mean(mrdoc2_est_ay2 -  true_ay, na.rm = T),
+            mrdoc2_cy2 = mean(mrdoc2_est_cy2 -  true_cy, na.rm = T),
+            mrdoc2_cx2 = mean(mrdoc2_est_cx2 -  true_cx, na.rm = T),
+            # all ses
+            mrdoc_g1 = mean(mrdoc_est_g1 -  sqrt(true_g1), na.rm = T),
+            mrdoc_b1 = mean(mrdoc_est_b1 -  sqrt(true_b1), na.rm = T),
+            mrdoc_b2 = mean(mrdoc_est_b2 -  sqrt(true_b2), na.rm = T), # distinct way of recording
+            mrdoc_covA = mean(mrdoc_est_ra -  true_ra, na.rm = T),
+            mrdoc_covC = mean(mrdoc_est_rc -  true_rc, na.rm = T),
+            mrdoc_ey2 = mean(mrdoc_est_ey2 -  true_ey, na.rm = T),
+            mrdoc_ex2 = mean(mrdoc_est_ex2 -  true_ex, na.rm = T),
+            mrdoc_ax2 = mean(mrdoc_est_ax2 -  true_ax, na.rm = T),
+            mrdoc_ay2 = mean(mrdoc_est_ay2 -  true_ay, na.rm = T),
+            mrdoc_cx2 = mean(mrdoc_est_cx2 -  true_cx, na.rm = T),
+            mrdoc_cy2 = mean(mrdoc_est_cy2 -  true_cy, na.rm = T),
+            # all ses
+            doc_g1 = mean(doc_est_g1 -  sqrt(true_g1), na.rm = T),
+            doc_covA = mean(doc_est_ra -  true_ra, na.rm = T),
+            doc_covC = mean(doc_est_rc -  true_rc, na.rm = T),
+            doc_ey2 = mean(doc_est_ey2 -  true_ey, na.rm = T),
+            doc_ex2 = mean(doc_est_ex2 -  true_ex, na.rm = T),
+            doc_cx2 = mean(doc_est_cx2 -  true_cx, na.rm = T),
+            doc_cy2 = mean(doc_est_cy2 -  true_cy, na.rm = T),
+            doc_ax2 = mean(doc_est_ax2 -  true_ax, na.rm = T),
+            doc_ay2 = mean(doc_est_ay2 -  true_ay, na.rm = T),
+            )   %>%
+  pivot_longer(cols = contains("doc"),
+               names_to="key", values_to="value")   %>%
+  mutate(tmp = stringr::str_split_fixed(key, "_", 2),
+         group = tmp[,1],
+         key = tmp[,2],
+         se = ifelse(str_detect(key,"_se"), value, NA_real_)) %>%
+  filter(!str_detect(key, "_se")) %>%
+  # filter(value != 0) %>%
+  ggplot(aes(x=reorder(key,-value), y=value, fill= key)) +
+  geom_bar(stat="identity", position="dodge") +
+  # add standard error bars
+  geom_linerange(aes(ymin = value - se, ymax = value + se),
+                position = position_dodge(width = 0.9),
+                width = 0.25) + # add error bars
+  facet_grid(reliability~group, scale = "free_x") + # rcc scales = "free_y") +
+  theme_luis() +
+  theme(legend.position = "bottom") +
+  labs(x = "", y = "Diff estimated - parameter value") +
+  scale_fill_manual(values = cb_palette, name = "Parameters")
+
+# ggsave("graphs/reliab_v4dpi.png", dpi = 300)
+
+#+end_src
+
+#+RESULTS:
+[[file:graphs/reliab.png]]
+
+
+* Any bias with fixed re values?
+
+
+#+begin_src R :exports both  :session R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores(), outfile = "")
+registerDoParallel(cl)
+
+
+bias_re <- foreach(g1=c(sqrt(.020),sqrt(.040)), .combine =rbind,
+                  .errorhandling = "remove",
+                  .packages = c("umx", "MASS",  "tidyr")) %:%
+          foreach(g2=c(sqrt(.020),sqrt(.040)), .combine =rbind) %:%
+          foreach(b3=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(b1=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(ra=c(0, .2), .combine =rbind) %:%
+          foreach(rc=c(0, .2), .combine =rbind) %:%
+          foreach(re = c(-.3,0,  .3), .combine = rbind)  %do% {
+
+  sim(g1 = g1,g2=g2, b1=b1, b3=b3,
+           ra = ra, rc = rc, re = re, est_out = T, re_test=T)
+
+  ## file = "data/23-7-20-re_fixed_doc.csv"
+
+  ## write.table(myDF, file,
+  ##   sep = ",",
+  ##   row.names = FALSE,
+  ##   col.names = !file.exists(file),
+  ##   append = T
+  ## )
+}
+
+stopCluster(cl)
+
+#+end_src
+
+#+header: :width 1000 :height 800 :res 120
+#+BEGIN_SRC R :exports both :session R-pw :results output graphics file :file graphs/re_in_data_v4.png
+
+## bias_re <- read_csv("data/23-7-20-re_fixed_doc.csv")
+# local1 %>% filter(re==0) %>%
+#   summarise(mean(mrdoc2_ra_hat),
+#   mean(ra),
+#   mean(mrdoc2_ra_hat - ra))
+
+bias_re %>%
+  ## filter(true_re!=0) %>%
+  group_by(true_re) %>%
+  # the below are the  relative biases
+  summarise(
+            # all ses
+            ## mrdoc2_g1 = mean(mrdoc2_est_g1 -  sqrt(true_g1), na.rm = t),
+            ## mrdoc2_b1 = mean(mrdoc2_est_b1 -  sqrt(true_b1), na.rm = t),
+            ## mrdoc2_b3 = mean(mrdoc2_est_b3 -  sqrt(true_b3), na.rm = t),
+            ## mrdoc2_g2 = mean(mrdoc2_est_g2 -  sqrt(true_g2), na.rm = t),
+            ## mrdoc2_ra = mean(mrdoc2_est_ra -  true_ra, na.rm = t),
+            ## mrdoc2_rc = mean(mrdoc2_est_rc -  true_rc, na.rm = t),
+            ## mrdoc2_ey2 = mean(mrdoc2_est_ey2 -  true_ey, na.rm = t),
+            ## mrdoc2_ex2 = mean(mrdoc2_est_ex2 -  true_ex, na.rm = t),
+            ## mrdoc2_ax2 = mean(mrdoc2_est_ax2 -  true_ax, na.rm = t),
+            ## mrdoc2_ay2 = mean(mrdoc2_est_ay2 -  true_ay, na.rm = t),
+            ## mrdoc2_cx2 = mean(mrdoc2_est_cx2 -  true_cx, na.rm = t),
+            ## mrdoc2_cy2 = mean(mrdoc2_est_cy2 -  true_cy, na.rm = t),
+            # all ses
+            mrdoc_g1 = mean(mrdoc_est_g1 -  sqrt(true_g1), na.rm = t),
+            mrdoc_b1 = mean(mrdoc_est_b1 -  sqrt(true_b1), na.rm = t),
+            mrdoc_b2 = mean(mrdoc_est_b2 -  sqrt(true_b2), na.rm = t),
+            mrdoc_covA = mean(mrdoc_est_ra -  true_ra, na.rm = t),
+            mrdoc_covC = mean(mrdoc_est_rc -  true_rc, na.rm = t),
+            mrdoc_ey2 = mean(mrdoc_est_ey2 -  true_ey, na.rm = t),
+            mrdoc_ex2 = mean(mrdoc_est_ex2 -  true_ex, na.rm = t),
+            mrdoc_ax2 = mean(mrdoc_est_ax2 -  true_ax, na.rm = t),
+            mrdoc_ay2 = mean(mrdoc_est_ay2 -  true_ay, na.rm = t),
+            mrdoc_cx2 = mean(mrdoc_est_cx2 -  true_cx, na.rm = t),
+            mrdoc_cy2 = mean(mrdoc_est_cy2 -  true_cy, na.rm = t),
+            # all ses
+            doc_g1 = mean(doc_est_g1 -  sqrt(true_g1), na.rm = t),
+            doc_covA = mean(doc_est_ra -  true_ra, na.rm = t),
+            doc_covC = mean(doc_est_rc -  true_rc, na.rm = t),
+            doc_ey2 = mean(doc_est_ey2 -  true_ey, na.rm = t),
+            doc_ex2 = mean(doc_est_ex2 -  true_ex, na.rm = t),
+            doc_cx2 = mean(doc_est_cx2 -  true_cx, na.rm = t),
+            doc_cy2 = mean(doc_est_cy2 -  true_cy, na.rm = t),
+            doc_ax2 = mean(doc_est_ax2 -  true_ax, na.rm = t),
+            doc_ay2 = mean(doc_est_ay2 -  true_ay, na.rm = t),
+            )   %>%
+  pivot_longer(cols = contains("doc"),
+               names_to="key", values_to="value")   %>%
+  mutate(tmp = stringr::str_split_fixed(key, "_", 2),
+         group = tmp[,1],
+         key = tmp[,2],
+         se = ifelse(str_detect(key,"_se"), value, NA_real_)) %>%
+  filter(!str_detect(key, "_se")) %>%
+  ggplot(aes(x=reorder(key,-value), y=value, fill= key)) +
+  geom_bar(stat="identity", position="dodge") +
+  facet_grid(true_re~group, scales = "free_x") + #,   scales = "free_y") +
+  theme_luis() +
+  theme(legend.position = "bottom") +
+  labs(x = "Parameters", y = "Diff estimated - parameter value") +
+  scale_fill_manual(values = cb_palette, name = "Parameter")
+
+# ggsave("graphs/re_in_datadpi.png", dpi = 300)
+
+#+end_src
+
+#+RESULTS:
+[[file:graphs/re_in_data_v4.png]]
+
+* Figure of variance explained in statistical power
+
+#+header: :width 1500 :height 500 :res 100
+#+BEGIN_SRC R :exports both :session R-pw :results output graphics file  :file graphs/ncp.png
+
+reg <- relal |> filter(reliability==FALSE)
+
+get_b2 <- function(dt, pars1, pars2) {
+  summary(lm(paste(substitute(pars1), substitute(pars2)), data = dt))$r.squared
+}
+
+## tribble(
+##    ~parm, ~ value,
+##    "g1", get_b2(reg, "scale(doc_ncp)~", "scale(true_g1)"),
+##     "ra", get_b2(reg, "scale(doc_ncp)~", "scale(true_ra)"),
+##     "rc", get_b2(reg, "scale(doc_ncp)~", "scale(true_rc)"),
+##     "ax", get_b2(reg, "scale(doc_ncp)~", "scale(true_ax)"),
+##     "cx", get_b2(reg, "scale(doc_ncp)~", "scale(true_cx)"),
+##     "ex", get_b2(reg, "scale(doc_ncp)~", "scale(true_ex)"),
+##     "ay", get_b2(reg, "scale(doc_ncp)~", "scale(true_ay)"),
+##     "cy", get_b2(reg, "scale(doc_ncp)~", "scale(true_cy)"),
+##     "ey", get_b2(reg, "scale(doc_ncp)~", "scale(true_ey)"), #) -> doc
+##     "R2", get_b2(reg, "scale(doc_ncp)~", "scale(true_g1) + scale(true_ra) + scale(true_rc) + scale(true_ay) + scale(true_ax) + scale(true_cy) + scale(true_cx) + scale(true_ey) + scale(true_ex)")) %>%
+## kable()
+
+## |parm |   value|
+## |:----|-------:|
+## |g1   | 0.71992|
+## |ra   | 0.09710|
+## |rc   | 0.10050|
+## |ax   | 0.22248|
+## |cx   | 0.23977|
+## |ex   | 0.61510|
+## |ay   | 0.12950|
+## |cy   | 0.12987|
+## |ey   | 0.38804|
+## |R2   | 0.99317|# same as above for mrdoc
+
+## tribble(
+##    ~parm, ~ value,
+##    "g1", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_g1)"),
+##     "b1", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_b1)"),
+##     "b2", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_b2)"),
+##     "ra", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_ra)"),
+##     "rc", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_rc)"),
+##     "ax", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_ax2)"),
+##     "cx", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_cx2)"),
+##     "ex", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_ex2)"),
+##     "ay", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_ay2)"),
+##     "cy", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_cy2)"),
+##     "ey", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_ey2)"), #) -> doc1 #,
+##     "R2", get_b2(reg, "scale(mrdoc_ncp)~", "scale(mrdoc_est_g1) + scale(mrdoc_est_b1) + scale(mrdoc_est_b2) + scale(mrdoc_est_ra) + scale(mrdoc_est_rc) + scale(mrdoc_est_ay2) + scale(mrdoc_est_ax2) + scale(mrdoc_est_cy2) + scale(mrdoc_est_cx2) + scale(mrdoc_est_ey2) + scale(mrdoc_est_ex2)")) %>%
+## kable()
+
+
+## |parm |   value|
+## |:----|-------:|
+## |g1   | 0.71761|
+## |b1   | 0.00351|
+## |b2   | 0.03297|
+## |ra   | 0.10326|
+## |rc   | 0.10115|
+## |ax   | 0.24268|
+## |cx   | 0.24056|
+## |ex   | 0.61428|
+## |ay   | 0.13374|
+## |cy   | 0.13059|
+## |ey   | 0.38798|
+## |R2   | 0.99501|
+
+# same as above for mrdoc
+## tribble(
+##    ~parm, ~ value,
+##    "g1", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_g1)"),
+##    "g2", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_g2)"),
+##     "b1", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_b1)"),
+##     "b3", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_b3)"),
+##     "ra", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_ra)"),
+##     "rc", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_rc)"),
+##     "re", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_re)"),
+##     "rf", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_rf)"),
+##     "ax", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_ax2)"),
+##     "cx", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_cx2)"),
+##     "ex", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_ex2)"),
+##     "ay", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_ay2)"),
+##     "cy", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_cy2)"),
+##     "ey", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_ey2)"), #) -> doc2 #,
+##     "R2", get_b2(reg, "scale(mrdoc2_ncp)~", "scale(mrdoc2_est_g1) + scale(mrdoc2_est_g2) +scale(mrdoc2_est_b1) + scale(mrdoc2_est_b3) + scale(mrdoc2_est_ra) + scale(mrdoc2_est_rc) + scale(mrdoc2_est_re)+ scale(mrdoc2_est_rf)+ scale(mrdoc2_est_ay2) + scale(mrdoc2_est_ax2) + scale(mrdoc2_est_cy2) + scale(mrdoc2_est_cx2) + scale(mrdoc2_est_ey2) + scale(mrdoc2_est_ex2)")) %>%
+## kable()
+
+
+
+## |parm |   value|
+## |:----|-------:|
+## |g1   | 0.42803|
+## |g2   | 0.00000|
+## |b1   | 0.50873|
+## |b3   | 0.00000|
+## |ra   | 0.00598|
+## |rc   | 0.00555|
+## |re   | 0.01625|
+## |rf   | 0.01325|
+## |ax   | 0.00790|
+## |cx   | 0.01097|
+## |ex   | 0.00788|
+## |ay   | 0.00676|
+## |cy   | 0.00984|
+## |ey   | 0.03947|
+## |R2   | 0.95150|
+
+tribble(
+~parm, ~value,
+   "g1", get_b2(reg, "doc_ncp~", "true_g1"),
+   "covA", get_b2(reg, "doc_ncp~", "true_ra"),
+   "covC", get_b2(reg, "doc_ncp~", "true_rc"),
+   "ax", get_b2(reg, "doc_ncp~", "true_ax"),
+   "cx", get_b2(reg, "doc_ncp~", "true_cx"),
+   "ex", get_b2(reg, "doc_ncp~", "true_ex"),
+   "ay", get_b2(reg, "doc_ncp~", "true_ay"),
+   "cy", get_b2(reg, "doc_ncp~", "true_cy"),
+   "ey", get_b2(reg, "doc_ncp~", "true_ey"),
+) -> doc
+
+
+
+# make this with tribble
+tribble(
+~parm, ~value,
+   "g1", get_b2(reg, "mrdoc_ncp~", "true_g1"),
+   "b1", get_b2(reg, "mrdoc_ncp~", "true_b1"),
+   "b2", get_b2(reg, "mrdoc_ncp~", "true_b2"),
+   "covA", get_b2(reg, "mrdoc_ncp~", "true_ra"),
+   "covC", get_b2(reg, "mrdoc_ncp~", "true_rc"),
+   "ax", get_b2(reg, "mrdoc_ncp~", "true_ax"),
+   "cx", get_b2(reg, "mrdoc_ncp~", "true_cx"),
+   "ex", get_b2(reg, "mrdoc_ncp~", "true_ex"),
+   "ay", get_b2(reg, "mrdoc_ncp~", "true_ay"),
+   "cy", get_b2(reg, "mrdoc_ncp~", "true_cy"),
+   "ey", get_b2(reg, "mrdoc_ncp~", "true_ey"),
+) -> doc1
+
+
+
+# make a trible with the above information
+
+doc2 <- tribble(
+  ~parm, ~value,
+   "g1", get_b2(reg, "mrdoc2_ncp~", "true_g1"),
+   "g2", get_b2(reg, "mrdoc2_ncp~", "true_g2"),
+   "b1", get_b2(reg, "mrdoc2_ncp~", "true_b1"),
+   "b3", get_b2(reg, "mrdoc2_ncp~", "true_b3"),
+   "covA", get_b2(reg, "mrdoc2_ncp~", "true_ra"),
+   "covC", get_b2(reg, "mrdoc2_ncp~", "true_rc"),
+   "covE", get_b2(reg, "mrdoc2_ncp~", "true_re"),
+   "rf", get_b2(reg, "mrdoc2_ncp~", "true_rf"),
+   "ax", get_b2(reg, "mrdoc2_ncp~", "true_ax"),
+   "cx", get_b2(reg, "mrdoc2_ncp~", "true_cx"),
+   "ex", get_b2(reg, "mrdoc2_ncp~", "true_ex"),
+   "ay", get_b2(reg, "mrdoc2_ncp~", "true_ay"),
+   "cy", get_b2(reg, "mrdoc2_ncp~", "true_cy"),
+   "ey", get_b2(reg, "mrdoc2_ncp~", "true_ey"),
+)
+
+# n <- 34
+# qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+# col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+# pie(rep(1,n), col=sample(col_vector, n))
+
+doc <- doc %>% mutate(model = "doc")
+doc1 <- doc1 %>% mutate(model = "mrdoc")
+doc2 <- doc2 %>% mutate(model = "mrdoc2")
+finalpow <- doc1 %>% full_join(doc2) %>% full_join(doc)
+
+
+# make a stacked bar plot
+milabs <- c("g1", "", "", "", "", "", "", "", "", "cy", "ey",
+            "g1", "b1", "b3", "ra", "rc", "re", "rf", "ay", "ax", "cy", "cx", "ey", "ex",
+            "g1", "", "", "", "",  "ex", "", "" ,"ey")
+
+nblabs <- c("0.53981", "", "", "0.03856", "0.03270", "", "", "", "", "", "",
+            "0.44812", "", "0.50181", "", "", "", "", "", "", "", "", "", "","",
+            "0.39115", "0.01653", "0.01368", "", "", "", "", "", "")
+
+
+
+ggplot(finalpow, aes(x = model, y = value, fill = reorder(parm,value))) +
+  geom_bar(stat = "identity", color = "black") +
+  theme_luis() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + #,
+        # legend.position="none") +
+  geom_label_repel(aes(label = round(value,3)),
+                   position = position_stack(vjust = 0.2),
+                   max.overlaps = 10, show.legend=FALSE) +
+  labs(x="Model",y="R2")+
+   scale_fill_manual(values=cb_palette, #breaks = c("g1", "b1",  "rf", "cy",  "ey", "ex") ,
+                   name = "Parameters")  +
+  ## scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))+
+   coord_flip() #+
+  # geom_text(aes(label = nblabs), position = position_stack(vjust = 0.5))
+
+
+#+end_src
+
+  #+results:
+  [[file:graphs/ncp.png]]
+
+
+
+* Data gen based on each model
+
+#+begin_src R :session R-pw :results output none
+
+sim_each  <- function(
+                 b1 = sqrt(.025),
+                 b3 = sqrt(.025),
+                 g1 = sqrt(.020),
+                 g2 = sqrt(.020),
+                 axs = .10,
+                 ays = .10,
+                 cxs = .10,
+                 cys = .10,
+                 ra = .2,
+                 rc = .2,
+                 re = .2,
+                 rf = .2,
+                 b2 =sqrt(.025),
+                 b4 = 0,
+                 Nmz = 1000,
+                 Ndz = 1000,
+                 noC = FALSE,
+                 do_id = FALSE,
+                 Ve_pinned = FALSE,
+                 hp = FALSE,
+                 do_pow = "conor",
+                 group = NULL,
+                 est_out = FALSE,
+                 reliability = FALSE,
+                 relx = .10,
+                 rely = .30,
+                 unrelated = FALSE,
+                 printSummary = FALSE,
+                 checkId = FALSE,
+                 fixre = FALSE,
+                 re_test = FALSE,
+                 fixrf = FALSE,
+                 out_cov = FALSE,
+                 model = c("doc", "mrdoc1", "mrdoc2")){
+
+
+                 ## b1 = sqrt(.025)
+                 ## b3 = sqrt(.025)
+                 ## g1 = sqrt(.020)
+                 ## g2 = sqrt(.020)
+                 ## axs = .10
+                 ## ays = .10
+                 ## cxs = .10
+                 ## cys = .10
+                 ## ra = .2
+                 ## rc = .2
+                 ## re = .2
+                 ## rf = .2
+                 ## b2 = 0
+                 ## b4 = 0
+                 ## Nmz = 1000
+                 ## Ndz = 1000
+                 ## noC = FALSE
+                 ## do_id = FALSE
+                 ## Ve_pinned = FALSE
+                 ## hp = FALSE
+                 ## do_pow = "conor"
+                 ## group = NULL
+                 ## est_out = TRUE
+                 ## reliability = TRUE
+                 ## relx = .1
+                 ## rely = .3
+                 ## unrelated = FALSE
+                 ## printSummary = FALSE
+                 ## checkId = FALSE
+                 ## fixre = FALSE
+                 ## re_test = FALSE
+                 ## fixrf = FALSE
+                 ## out_cov = FALSE
+                 ## model = "mrdoc1"
+
+  cy=cys
+  cx=cxs
+  ay=ays
+  ax=axs
+
+  if (Ve_pinned) {
+    ey = ex = .01
+  } else {
+    ey=1-(ays+cys)
+    ex=1-(axs+cxs)
+  }
+
+
+  bgpars=c(b1,b2,b3, g1,g2)^2
+  if (g1<0) bgpars[4]=-(g1^2)
+  if (g2<0) bgpars[5]=-(g2^2)
+  keep  =  data.frame(true_b1 = bgpars[1],true_b2 = bgpars[2], true_b3 = bgpars[3],
+                      true_g1 = bgpars[4], true_g2 = bgpars[5])
+  keep$true_ra = ra
+  keep$true_re = re
+  keep$true_rf = rf
+  keep$true_ay = ay
+  keep$true_ey = ey
+  keep$true_ax = ax
+  keep$true_ex = ex
+  keep$true_cy = cy
+  keep$true_cx = cx
+  keep$true_rc = rc
+  keep$true_b4 = b4
+  keep$group = group
+
+  if (reliability){keep$reliability = TRUE} else {keep$reliability = FALSE}
+
+
+  if (model == "mrdoc2") {
+
+  # Model object to the data gen step
+    Sigma = mrdoc_maker("mrdoc2") |>
+      umxModify(update = c("b1","b3","g1","g2","ax2","ay2",
+                  "cx2","cy2","ex2","ey2","ra","rc","re","rf"),
+                  value = c(b1,b3,g1,g2,axs,ays,
+                  cxs,cys,ex,ey,ra,rc,re,rf),
+                      free = T,
+                      autoRun = FALSE) |>
+      mxGetExpected( "covariances")
+
+  Smz=Sigma$MZ
+  Sdz=Sigma$DZ
+
+    ## v <- 1/sqrt(diag(Smz))
+    ## Smz <- Smz * outer(v,v)
+    ## v <- 1/sqrt(diag(Sdz))
+    ## Sdz <- Sdz * outer(v,v)
+
+
+    # Here is the code for introducing unreliability at the pheno
+  if (reliability == TRUE) {
+
+
+    Smz=Smz +  diag( diag(Smz)*c(relx, rely, 0,0,relx, rely))
+    Sdz=Sdz + diag(diag(Sdz)*c(relx, rely, 0,0,relx, rely,0,0))
+
+
+
+  }
+
+
+  ###############################
+  ### DATA GEN ENDS ###
+  ###############################
+
+  mrdoc2 = mrdoc_maker(type = "mrdoc2")
+
+  meansmz =   rep(0,6)
+  names(meansmz) =  c("X1", "Y1","PSx1", "PSy1", "X2", "Y2")
+
+  meansdz =   rep(0,8)
+  names(meansdz) =  c("X1", "Y1","PSx1", "PSy1", "X2", "Y2","PSx2", "PSy2")
+
+  mrdoc2$MZ = mrdoc2$MZ +
+    mxData(observed=Smz,
+           type="cov",  means=meansmz, numObs = 1000)
+
+  mrdoc2$DZ = mrdoc2$DZ +
+    mxData(observed=Sdz,
+           type="cov",  means=meansdz, numObs = 1000)
+
+  # Starting values here again, to make the life of the optimizer easy
+   mrdoc2 <-  mrdoc2 |>
+     umxModify(update = c("b1","b3","g1","g2","ax2","ay2",
+                  "cx2","cy2","ex2","ey2","ra","rc","re","rf"),
+                  value = c(b1,b3,g1,g2,axs,ays,
+                  cxs,cys,ex,ey,ra,rc,re,rf),
+                      free = T,
+                      autoRun = FALSE) |>
+    mxRun()
+
+
+    if (noC) {mrdoc2 = umxModify(mrdoc2, update = c("cy2","rc"), autoRun = F) |> mxRun()}
+
+    if (checkId) {message("mrdoc2: "); mxCheckIdentification(mrdoc2)$status}
+
+
+   if (do_pow == "conor") {
+    tmp <- mrdoc2 |>
+      omxSetParameters(labels = c("g1"), values = 0, free = F) |>
+      mxTryHard() |>
+      mxCompare(base = mrdoc2)
+
+
+    keep$mrdoc2_ncp <- tmp$diffLL[2]
+    keep$mrdoc2_df <- tmp$df[2]
+
+   } else if (do_pow == "bidir") {
+    tmp <- mrdoc2 |>
+      omxSetParameters(labels = c("g1","g2"), values = 0, free = F) |>
+      mxTryHard() |>
+      mxCompare(base = mrdoc2)
+    keep$mrdoc2_ncp <- tmp$diffLL[2]
+
+   }
+
+    keep <- keep |>
+      bind_cols(
+      tibble(names = summary(mrdoc2)$parameters$name,
+                        est = summary(mrdoc2)$parameters$Estimate,
+                        se = summary(mrdoc2)$parameters$Std.Error) %>%
+                pivot_wider(names_from = "names",
+                            values_from = c("est","se"),
+                            names_glue = "mrdoc2_{.name}",
+                            names_sort = TRUE)
+      )
+
+
+
+    ###############################
+    ### MRDOC 2 ENDS
+    ###############################
+
+  } else if (model == "mrdoc1"){
+
+
+    ###############################
+    ### MRDOC1 FROM HERE
+    ###############################
+
+
+
+ Sigma = mrdoc_maker("mrdoc1") |>
+   umxModify(update = c("b1","b2","g1",
+                        "ax2","ay2","cx2","cy2",
+                        "ex2","ey2","ra","rc", "re"),
+             value = c(b1,b2,g1,
+                       ax,ay,cx,cy,
+                       ex,ey,ra,rc, re),
+                     free = T,
+                     autoRun = FALSE) |>
+   mxGetExpected("covariances")
+
+  Smz=Sigma$MZ
+  Sdz=Sigma$DZ
+
+    ## v <- 1/sqrt(diag(Smz))
+    ## Smz <- Smz * outer(v,v)
+    ## v <- 1/sqrt(diag(Sdz))
+    ## Sdz <- Sdz * outer(v,v)
+
+  if (reliability == TRUE) {
+    Smz=Smz + diag(diag(Smz)*c(relx, rely, 0,relx, rely))
+    Sdz=Sdz + diag(diag(Sdz)*c(relx, rely, 0,relx, rely,0))
+  }
+
+
+  ###############################
+  ### DATA GEN ENDS ###
+  ###############################
+
+
+    ###############################
+    ### MRDOC1 FROM HERE
+    ###############################
+
+
+mrdoc = mrdoc_maker(type = "mrdoc1")
+
+  meansmz =   rep(0,5)
+  names(meansmz) =  c("X1", "Y1","PSx1",  "X2", "Y2")
+
+  meansdz =   rep(0,6)
+  names(meansdz) =  c("X1", "Y1","PSx1",  "X2", "Y2","PSx2")
+
+  mrdoc$MZ = mrdoc$MZ +
+    mxData(observed=Smz,
+           type="cov",  means=meansmz, numObs = 1000)
+
+  mrdoc$DZ = mrdoc$DZ +
+    mxData(observed=Sdz,
+           type="cov",  means=meansdz, numObs = 1000)
+
+
+  mrdoc <- mrdoc |>   umxModify(update = c("b1","b2","g1",
+                        "ax2","ay2","cx2","cy2",
+                        "ex2","ey2","ra","rc"),
+             value = c(b1,b2,g1,
+                       ax,ay,cx,cy,
+                       ex,ey,ra,rc),
+                     free = T,
+                     autoRun = FALSE) |>
+ mxRun()
+
+
+    if (noC) {mrdoc = umxModify(mrdoc, update = c( "cy2","rc"), autoRun = F) |> mxRun()}
+    if (out_cov) {return(mxGetExpected(mrdoc, "covariance"))}
+
+    if (checkId) {message("mrdoc: "); mxCheckIdentification(mrdoc)$status}
+
+
+
+   if (do_pow == "conor") {
+
+    tmp <- mrdoc |>
+      omxSetParameters(labels = "g1", values = 0, free = F) |>
+      mxTryHard() |>
+      mxCompare(base = mrdoc)
+
+         keep$mrdoc_ncp <- tmp$diffLL[2]
+         keep$mrdoc_df <- tmp$df[2]
+   }
+
+    keep <- keep |>
+      bind_cols(
+        tibble(names = summary(mrdoc)$parameters$name,
+                        est = summary(mrdoc)$parameters$Estimate,
+                        se = summary(mrdoc)$parameters$Std.Error) %>%
+                pivot_wider(names_from = "names",
+                            values_from = c("est","se"),
+                            names_glue = "mrdoc_{.name}",
+                            names_sort = TRUE)
+        )
+
+
+  } else if (model == "doc"){
+
+  # Aqui entra a geraćão dos dados com mrcod2
+ Sigma = mrdoc_maker("doc") |>
+    umxModify(update = c("g1",
+                         "ax2","ay2","cx2","cy2",
+                         "ex2","ey2","ra","rc","re"),
+              value = c(g1,ax,ay,cx,cy,ex,ey,
+                        ra,rc,re),
+              free = T,
+              autoRun = FALSE) |>
+    mxGetExpected("covariances")
+
+
+  Smz=Sigma$MZ
+  Sdz=Sigma$DZ
+
+    ## v <- 1/sqrt(diag(Smz))
+    ## Smz <- Smz * outer(v,v)
+    ## v <- 1/sqrt(diag(Sdz))
+    ## Sdz <- Sdz * outer(v,v)
+
+
+  if (reliability == TRUE) {
+     Smz=Smz + diag(diag(Smz)*c(relx, rely, relx, rely))
+    Sdz=Sdz + diag(diag(Sdz)*c(relx, rely, relx, rely))
+
+
+  }
+
+
+  ###############################
+  ### DATA GEN ENDS ###
+  ###############################
+
+
+    ###############################
+    ### MRDOC1 FROM HERE
+    ###############################
+
+
+doc = mrdoc_maker(type = "doc")
+
+  meansmz =   rep(0,4)
+  names(meansmz) =  c("X1", "Y1",  "X2", "Y2")
+
+  meansdz =   rep(0,4)
+  names(meansdz) =  c("X1", "Y1",  "X2", "Y2")
+
+
+  doc$MZ = doc$MZ +
+    mxData(observed=Smz,
+           type="cov",  means=meansmz, numObs = 1000)
+
+  doc$DZ = doc$DZ +
+    mxData(observed=Sdz,
+           type="cov",  means=meansdz, numObs = 1000)
+
+  # Need to set starting values here
+  # parameters(Sigma)
+  doc <- doc |>
+    umxModify(update = c("g1",
+                         "ax2","ay2","cx2","cy2",
+                         "ex2","ey2","ra","rc"),
+              value = c(g1,ax,ay,cx,cy,ex,ey,
+                        ra,rc),
+              free = T,
+              autoRun = FALSE) |>
+    mxRun()
+
+    if (noC) {doc= umxModify(doc,update = c("cy2","rc"), autoRun = F) |> mxRun()}
+
+    if (checkId) {message("doc: "); mxCheckIdentification(doc)$status}
+
+   if (do_pow == "conor") {
+
+    tmp <- doc |>
+      omxSetParameters(labels = "g1", values = 0, free = F) |>
+      mxTryHard() |>
+      mxCompare(base = doc)
+      keep$doc_ncp <- tmp$diffLL[2]
+      keep$doc_df <- tmp$df[2]
+   }
+
+    keep <- keep |>
+      bind_cols(
+        tibble(names = summary(doc)$parameters$name,
+                        est = summary(doc)$parameters$Estimate,
+                        se = summary(doc)$parameters$Std.Error) %>%
+                pivot_wider(names_from = "names",
+                            values_from = c("est","se"),
+                            names_glue = "doc_{.name}",
+                            names_sort = TRUE)
+        )
+
+
+
+  }
+    keep # |>print()
+}
+
+#+end_src
+
+
+** Reliability, and  measurement error
+
+#+begin_src R :exports both :session R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores(), outfile = "")
+registerDoParallel(cl)
+
+
+
+doc_relal <- foreach(g1=c(sqrt(.025),sqrt(.040)), .combine =rbind,
+                  .errorhandling = "remove",
+                  .packages = c("umx", "MASS",  "tidyr")) %:%
+          foreach(ra=c(0, .1), .combine =rbind) %:%
+  foreach(reliability = c(FALSE, TRUE), .combine=rbind) %:%
+          foreach(rc=c(0, .1), .combine =rbind) %do% {
+
+          sim_each(g1 = g1,
+                    ra= ra, rc = rc, #axs=axs,
+                   ## re = 0, # This is required since I merged scripts
+                    est_out = TRUE, reliability = reliability,
+                    model = "doc", relx=.1, rely=.3
+            )
+
+
+
+}
+
+stopCluster(cl)
+
+# teste <- read_csv("data/23-7-20-mrdoc2-each-relal.csv")
+#+end_src
+
+#+begin_src R :exports both :session R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores(), outfile = "")
+registerDoParallel(cl)
+
+
+
+mrdoc_relal <- foreach(g1=c(sqrt(.020),sqrt(.040)), .combine =rbind,
+                  .errorhandling = "remove",
+                  .packages = c("umx", "MASS",  "tidyr")) %:%
+          foreach(g2=c(sqrt(.020),sqrt(.040)), .combine =rbind) %:%
+          foreach(b1=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(b2=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(ra=c(0, .1), .combine =rbind) %:%
+  foreach(reliability = c(FALSE, TRUE), .combine=rbind) %:%
+          foreach(rc=c(0, .1), .combine =rbind) %do% {
+
+          sim_each(g1 = g1, g2 = g2, b1 = b1, b2 = b2,
+                    ra= ra, rc = rc, #axs=axs,
+                   ## re = 0, # This is required since I merged scripts
+                    est_out = TRUE, reliability = reliability,
+                    model = "mrdoc1", relx=.1, rely=.3
+
+            )
+
+}
+
+stopCluster(cl)
+
+# teste <- read_csv("data/23-7-20-mrdoc2-each-relal.csv")
+#+end_src
+
+#+begin_src R :exports both  :session R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores(), outfile = "")
+registerDoParallel(cl)
+
+
+mrdoc2_relal <- foreach(g1=c(sqrt(.020),sqrt(.040)),
+                  .combine =rbind,
+                  .errorhandling = "remove",
+                  .packages = c("umx", "MASS",  "tidyr")) %:%
+          foreach(g2=c(sqrt(.020),sqrt(.040)), .combine =rbind) %:%
+          foreach(b3=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(b1=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(reliability = c(FALSE, TRUE), .combine=rbind) %:%
+          foreach(ra=c(0, .2), .combine =rbind) %:%
+          foreach(rc=c(0, .2), .combine =rbind) %do%     {
+
+          sim_each(g1 = g1,b1 = b1, g2 = g2, b3 = b3,
+                    ra= ra, rc = rc, #axs=axs,
+                    # re = 0, # not required here due to mrdoc2 specs
+                    est_out = T, reliability = reliability,
+                    model = "mrdoc2", relx=.1, rely=.3
+            )
+
+  ##             file = "data/23-7-25-mrdoc2-each-relal.csv"
+
+  ## write.table(myDF, file,
+  ##   sep = ",",
+  ##   row.names = FALSE,
+  ##   col.names = !file.exists(file),
+  ##   append = T
+
+  ## )
+
+
+}
+
+stopCluster(cl)
+
+# teste <- read_csv("data/23-7-20-mrdoc2-each-relal.csv")
+#+end_src
+
+#+header: :width 1800 :height 600 :res 120
+#+BEGIN_SRC R :exports both :session R-pw :results output graphics file  :file graphs/relal-bias-v4.png
+
+## mrdoc2_relal <- read_csv("data/23-7-25-mrdoc2-each-relal.csv")
+doc_relal %>%
+  mutate(group = "doc") %>%
+  bind_rows(mrdoc_relal %>%
+              mutate(group = "mrdoc")) %>%
+  bind_rows(mrdoc2_relal %>%
+            mutate(group = "mrdoc2"))  %>%
+    ## mutate(reliability = ifelse(reliability == TRUE, "Unreliable", "Reliable")) %>%
+  filter(reliability == "TRUE")%>%
+  group_by(group) %>%
+  # the below are the  relative biases
+  summarise(
+            mrdoc2_g2 = mean(mrdoc2_est_g2 -  sqrt(true_g2), na.rm= T),
+            mrdoc2_g1 = mean(mrdoc2_est_g1 -  sqrt(true_g1), na.rm= T),
+            mrdoc2_b1 = mean(mrdoc2_est_b1 -  sqrt(true_b1), na.rm= T),
+            mrdoc2_b3 = mean(mrdoc2_est_b3 -  sqrt(true_b3), na.rm= T),
+            mrdoc2_covA = mean(mrdoc2_est_ra -  true_ra, na.rm= T),
+            mrdoc2_covC = mean(mrdoc2_est_rc -  true_rc, na.rm= T),
+            mrdoc2_covE = mean(mrdoc2_est_re -  true_re, na.rm= T),
+            mrdoc2_rf = mean(mrdoc2_est_rf -  true_rf, na.rm= T),
+            mrdoc2_ey2 = mean(mrdoc2_est_ey2 -  true_ey, na.rm= T),
+            mrdoc2_ex2 = mean(mrdoc2_est_ex2 -  true_ex, na.rm= T),
+            mrdoc2_ax2 = mean(mrdoc2_est_ax2 -  true_ax, na.rm= T),
+            mrdoc2_ay2 = mean(mrdoc2_est_ay2 -  true_ay, na.rm= T),
+            mrdoc2_cy2 = mean(mrdoc2_est_cy2 -  true_cy, na.rm= T),
+            mrdoc2_cx2 = mean(mrdoc2_est_cx2 -  true_cx, na.rm= T),
+            # all ses
+            mrdoc_g1 = mean(mrdoc_est_g1 -  sqrt(true_g1), na.rm= T),
+            mrdoc_b1 = mean(mrdoc_est_b1 -  sqrt(true_b1), na.rm= T),
+            mrdoc_b2 = mean(mrdoc_est_b2 -  sqrt(true_b2), na.rm= T),
+            mrdoc_covA = mean(mrdoc_est_ra -  true_ra, na.rm= T),
+            mrdoc_covC = mean(mrdoc_est_rc -  true_rc, na.rm= T),
+            mrdoc_ey2 = mean(mrdoc_est_ey2 -  true_ey, na.rm= T),
+            mrdoc_ex2 = mean(mrdoc_est_ex2 -  true_ex, na.rm= T),
+            mrdoc_ax2 = mean(mrdoc_est_ax2 -  true_ax, na.rm= T),
+            mrdoc_ay2 = mean(mrdoc_est_ay2 -  true_ay, na.rm= T),
+            mrdoc_cx2 = mean(mrdoc_est_cx2 -  true_cx, na.rm= T),
+            mrdoc_cy2 = mean(mrdoc_est_cy2 -  true_cy, na.rm= T),
+            # all ses
+            doc_g1 = mean(doc_est_g1 -  sqrt(true_g1), na.rm= T),
+            doc_covA = mean(doc_est_ra -  true_ra, na.rm= T),
+            doc_covC = mean(doc_est_rc -  true_rc, na.rm= T),
+            doc_ey2 = mean(doc_est_ey2 -  true_ey, na.rm= T),
+            doc_ex2 = mean(doc_est_ex2 -  true_ex, na.rm= T),
+            doc_cx2 = mean(doc_est_cx2 -  true_cx, na.rm= T),
+            doc_cy2 = mean(doc_est_cy2 -  true_cy, na.rm= T),
+            doc_ax2 = mean(doc_est_ax2 -  true_ax, na.rm= T),
+            doc_ay2 = mean(doc_est_ay2 -  true_ay, na.rm= T),
+            )   %>%
+  pivot_longer(cols = contains("doc"),
+               names_to="key", values_to="value")   %>%
+  mutate(tmp = stringr::str_split_fixed(key, "_", 2),
+         group = tmp[,1],
+         key = tmp[,2],
+         se = ifelse(str_detect(key,"_se"), value, NA_real_)) %>%
+  filter(!str_detect(key, "_se")) %>%
+  # filter(value != 0) %>%
+  ggplot(aes(x=reorder(key,-value), y=value, fill= key)) +
+  geom_bar(stat="identity", position="dodge") +
+  # add standard error bars
+  ## geom_linerange(aes(ymin = value - se, ymax = value + se),
+                ## position = position_dodge(width = 0.9),
+                ## width = 0.25) + # add error bars
+    facet_grid(~group, scale = "free_x") + # rcc scales = "free_y") +
+  theme_luis() +
+  theme(legend.position = "bottom") +
+  labs(x = "", y = "Diff estimated - parameter value") +
+  scale_fill_manual(values = cb_palette, name = "Parameters")
+
+
+
+# ggsave("graphs/relal-bias-v4png.png", dpi = 300)
+
+#+end_src
+
+#+RESULTS:
+[[file:graphs/relal-bias-v4.png]]
+
+** Any bias w fixed re values
+
+#+begin_src R :exports both :session R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores(), outfile = "")
+registerDoParallel(cl)
+
+mrdoc_re <- foreach(g1=c(sqrt(.020),sqrt(.040)), .combine =rbind,
+                  .packages = c("umx", "MASS",  "tidyr")) %:%
+          foreach(b2=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(b1=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(ra=c(0, .2), .combine =rbind) %:%
+          foreach(rc=c(0, .2), .combine =rbind) %:%
+          foreach(re = c(-.3,0,.3), .combine = rbind)  %do% {
+
+    sim_each(g1 = g1, b1=b1, b2=b2,
+           ra = ra, rc = rc, re = re,
+           est_out = TRUE, do_pow = FALSE,
+           model = "mrdoc1")
+
+}
+
+
+stopCluster(cl)
+
+#+end_src
+
+
+#+begin_src R :exports both :session  R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores(), outfile = "")
+registerDoParallel(cl)
+
+mrdoc2_re <- foreach(g1=c(sqrt(.020),sqrt(.040)), .combine =rbind,
+                  .packages = c("umx", "MASS",  "tidyr")) %:%
+          foreach(g2=c(sqrt(.020),sqrt(.040)), .combine =rbind) %:%
+          foreach(b3=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(b1=c(sqrt(.025),sqrt(.05)), .combine =rbind) %:%
+          foreach(ra=c(0, .2), .combine =rbind) %:%
+          foreach(rc=c(0, .2), .combine =rbind) %:%
+          foreach(re = c(-.3,0,.3), .combine = rbind)  %do% {
+
+   sim_each(g1 = g1, g2=g2, b1=b1, b3=b3,
+           ra = ra, rc = rc, re = re,
+           est_out = TRUE,
+           model = "mrdoc2")
+
+}
+
+
+stopCluster(cl)
+
+#+end_src
+
+#+begin_src R  :exports both :session R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores(), outfile = "")
+registerDoParallel(cl)
+
+doc_re <- foreach(ra=c(0, .2), .combine =rbind,
+                  .packages = c("umx", "MASS",  "tidyr")) %:%
+          foreach(rc=c(0, .2), .combine =rbind) %:%
+          foreach(re = c(-.3,0,.3), .combine = rbind)  %do% {
+
+  sim_each(
+           ra = ra, rc = rc, re = re,
+           est_out = TRUE,
+           model = "doc", do_pow = FALSE)
+
+}
+
+
+stopCluster(cl)
+
+#+end_src
+
+#+header: :width 1000 :height 500 :res 100
+#+BEGIN_SRC R :exports both :session R-pw :results output graphics file  :file graphs/re-bias-v4.png
+
+doc_re %>%
+  ## mutate(group = "doc") %>%
+  bind_rows(mrdoc_re ) %>%
+  bind_rows(mrdoc2_re )  %>%
+  filter(true_re!=0) %>%
+  group_by(true_re) %>%
+  summarise(
+            # all ses
+            mrdoc_g1 = mean(mrdoc_est_g1 -  sqrt(true_g1), na.rm= T),
+            mrdoc_b1 = mean(mrdoc_est_b1 -  sqrt(true_b1), na.rm= T),
+            mrdoc_b2 = mean(mrdoc_est_b2 -  sqrt(true_b2), na.rm= T),
+            mrdoc_covA = mean(mrdoc_est_ra -  true_ra, na.rm= T),
+            mrdoc_covC = mean(mrdoc_est_rc -  true_rc, na.rm= T),
+            mrdoc_ey2 = mean(mrdoc_est_ey2 -  true_ey, na.rm= T),
+            mrdoc_ex2 = mean(mrdoc_est_ex2 -  true_ex, na.rm= T),
+            mrdoc_ax2 = mean(mrdoc_est_ax2 -  true_ax, na.rm= T),
+            mrdoc_ay2 = mean(mrdoc_est_ay2 -  true_ay, na.rm= T),
+            mrdoc_cx2 = mean(mrdoc_est_cx2 -  true_cx, na.rm= T),
+            mrdoc_cy2 = mean(mrdoc_est_cy2 -  true_cy, na.rm= T),
+            # all ses
+            doc_g1 = mean(doc_est_g1 -  sqrt(true_g1), na.rm= T),
+            doc_covA = mean(doc_est_ra -  true_ra, na.rm= T),
+            doc_covC = mean(doc_est_rc -  true_rc, na.rm= T),
+            doc_ey2 = mean(doc_est_ey2 -  true_ey, na.rm= T),
+            doc_ex2 = mean(doc_est_ex2 -  true_ex, na.rm= T),
+            doc_cx2 = mean(doc_est_cx2 -  true_cx, na.rm= T),
+            doc_cy2 = mean(doc_est_cy2 -  true_cy, na.rm= T),
+            doc_ax2 = mean(doc_est_ax2 -  true_ax, na.rm= T),
+            doc_ay2 = mean(doc_est_ay2 -  true_ay, na.rm= T),
+            )   %>%
+  pivot_longer(cols = contains("doc"),
+               names_to="key", values_to="value")   %>%
+  mutate(tmp = stringr::str_split_fixed(key, "_", 2),
+         group = tmp[,1],
+         key = tmp[,2],
+         se = ifelse(str_detect(key,"_se"), value, NA_real_)) %>%
+  filter(!str_detect(key, "_se")) %>%
+    ## mutate(key = fct_reorder(key, value)) %>%  # Add this line
+  ## ungroup() %>%
+  # filter(value != 0) %>%
+  # reorder with fctreorder in ggplot
+  ggplot(aes(x=fct_inorder(key), y=value, fill= key)) +
+  geom_bar(stat="identity", position="dodge") +
+   facet_grid(true_re~group, scales = "free_x") + # rcc scales = "free_y") +
+  theme_luis() +
+  theme(legend.position = "bottom") +
+  labs(x = "", y = "Diff estimated - parameter value") +
+  scale_fill_manual(values = cb_palette, name = "Parameters")
+
+
+#+END_SRC
+
+#+RESULTS:
+[[file:graphs/re-bias-v4.png]]
+
+* Precision with increasing b1?
+
+#+begin_src R :session R-pw :results output none
+try(stopCluster(cl))
+cl <- makeCluster(detectCores()-1, outfile = "")
+registerDoParallel(cl)
+
+precision2 <- foreach(
+  b1 = c( 0.9,0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.01),
+                 .combine=rbind,
+                    .packages = c("umx", "MASS",  "tidyr","dplyr"))   %dopar% {
+
+  sim_each(model = "mrdoc1", b1=b1)
+
+}
+
+
+stopCluster(cl)
+#+end_src
+
+#+header: :width 1000 :height 500 :res 100
+#+BEGIN_SRC R :exports both :session R-pw :results output graphics file  :file graphs/precision.png
+precision2 %>%
+              select(mrdoc_se_g1, true_b1) %>%
+  ggplot(aes(x = true_b1, y = mrdoc_se_g1)) +
+  geom_line(size = 1) +
+  geom_point(size = 1.5) +
+  scale_color_manual(values = cb_palette) +
+  theme_linedraw()
+#+end_src
+
+#+RESULTS:
+[[file:graphs/precision.png]]
+
+* Power diff in different a
+
+
+#+begin_src R :session R-pw :results output none
+
+try(stopCluster(cl))
+cl <- makeCluster(detectCores()-1, outfile="")
+registerDoParallel(cl)
+
+power <- foreach(axs = c( 0.9,0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1 ),
+                 ays = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 ),
+                 cxs = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 ),
+                 cys = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+                  group =c(".80", ".70", ".60", ".50", ".40", ".30", ".20", ".10", "0"),
+                 .errorhandling = "remove",
+                 .combine=rbind,
+                    .packages = c("umx", "MASS"))  %do% {
+
+   sim_each(axs = axs, ays = ays, cxs=cxs, cys = cxs,
+            ## ra =.25, rc=.25, b2=sqrt(.25),b1 = sqrt(0.01),g1 = sqrt(0.01),g2 = sqrt(0.25),
+             model = "doc", group = group, Ve_pinned = T) #, noC = T)
+
+}
+## power <- foreach(
+##                  # redo in steps of .05
+##                  axs = c(0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45, 0.4, 0.35, 0.3, 0.25, 0.2, 0.15, 0.1),
+##                   ays = c( 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+##                   cxs = c(  0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+##                   cys = c(  0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+##                  group = c( "80","75", "70", "65", "60", "55", "50", "45", "40", "35", "30", "25", "20", "15", "10", "5", "0"),
+##                  .errorhandling = "remove",
+##                  .combine=rbind,
+##                     .packages = c("umx", "MASS"))  %do% {
+
+##    sim_each(axs = axs, ays = ays, cxs=cxs, cys = cxs,
+##             ## ra =.25, rc=.25, b2=sqrt(.25),b1 = sqrt(0.01),g1 = sqrt(0.01),g2 = sqrt(0.25),
+##              model = "doc", group = group) #, noC = T)
+
+## }
+
+power1 <- foreach(axs = c( 0.9,0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1 ),
+                  ays = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 ),
+                  cxs = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 ),
+                  cys = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+                  group =c(".80", ".70", ".60", ".50", ".40", ".30", ".20", ".10", "0"),
+                  .errorhandling = "remove",
+                  .combine=rbind,
+                     .packages = c("umx", "MASS"))  %do% {
+
+   sim_each(axs = axs, ays = ays, cxs=cxs, cys = cxs,
+            ## ra =.25, rc=.25, b2=sqrt(.25),b1 = sqrt(0.25),g1 = sqrt(0.25),g2 = sqrt(0.25),
+               model = "mrdoc1", group = group , Ve_pinned = T) #, noC = T)
+
+
+}
+
+power2 <- foreach(axs = c( 0.9,0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1 ),
+                  ays = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 ),
+                  cxs = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 ),
+                  cys = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+                  group =c(".80", ".70", ".60", ".50", ".40", ".30", ".20", ".10", "0"),
+                  .errorhandling = "remove",
+                  .combine=rbind,
+                     .packages = c("umx", "MASS"))  %do% {
+
+   sim_each(axs = axs, ays = ays, cxs=cxs, cys = cxs,
+            ## ra =.25, rc=.25, b3=sqrt(.25),b1 = sqrt(0.25),g1 = sqrt(0.25),g2 = sqrt(0.25),
+               model = "mrdoc2", group = group, Ve_pinned = T) #noC = T,,  do_pow = "bidir"
+
+}
+
+power3 <- foreach(axs = c( 0.9,0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1 ),
+                  ays = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 ),
+                  cxs = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1 ),
+                  cys = c( 0.1,0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1),
+                  group =c(".80", ".70", ".60", ".50", ".40", ".30", ".20", ".10", "0"),
+                  .combine=rbind,
+                     .packages = c("umx", "MASS"))  %do% {
+
+   sim_each(axs = axs, ays = ays, cxs=cxs, cys = cxs,
+            ## ra =.25, rc=.25, b3=sqrt(.25),b1 = sqrt(0.25),g1 = sqrt(0.25),g2 = sqrt(0.25),
+               model = "mrdoc2", group = group,  do_pow = "bidir") #noC = T,
+
+}
+
+stopCluster(cl)
+
+
+#+end_src
+
+#+header: :width 1000 :height 500 :res 100
+#+BEGIN_SRC R :exports both :session R-pw :results output graphics file  :file graphs/power.png
+# rename all variables with mrdoc2_ to mrdoc3_
+## names(power3) <- gsub("mrdoc2_", "mrdoc3_", names(power3))
+
+
+plot_dt <- power |>
+  full_join(power1, by = c("true_b1", "true_b3", "true_b4", "true_g1",
+                           "true_g2", "true_ra", "true_re", "true_rf",
+                           "true_ey", "true_ax", "true_ex",  "true_cy",
+                           "true_cx", "true_rc", "true_b2", "group",
+                           "reliability", "true_ay")) |>
+  full_join(power2, by = c("true_b1", "true_b3", "true_b4", "true_g1",
+                           "true_g2", "true_ra", "true_re", "true_rf",
+                           "true_ey", "true_ax", "true_ex",  "true_cy",
+                           "true_cx", "true_rc", "true_b2", "group",
+                           "reliability", "true_ay"))|>
+  full_join(power3 %>% rename(mrdoc3_ncp = mrdoc2_ncp), by = c("true_b1", "true_b3", "true_b4", "true_g1",
+                           "true_g2", "true_ra", "true_re", "true_rf",
+                           "true_ey", "true_ax", "true_ex",  "true_cy",
+                           "true_cx", "true_rc", "true_b2", "group",
+                           "reliability", "true_ay"))
+
+
+# Assuming 'doc_ncp', 'mrdoc_ncp', and 'mrdoc2_ncp' are the columns in your data frame 'plot_dt'
+# First, we need to reshape the data from wide to long format
+plot_dt_long <- plot_dt |>
+  # rename cols
+  rename(doc = doc_ncp, mrdoc = mrdoc_ncp, mrdoc2 = mrdoc2_ncp, mrdoc2_2df = mrdoc3_ncp) |>
+  tidyr::pivot_longer(cols = c(doc, mrdoc, mrdoc2, mrdoc2_2df),
+                      names_to = "variable",
+                      values_to = "value")
+
+# Now, we can create the plot with facets
+ggplot(plot_dt_long, aes(x = as.numeric(group), y = value, color = variable)) +
+  geom_point() +
+  geom_line() +
+  scale_color_manual(values = cb_palette) +
+  facet_wrap(~variable, scale = "free") +
+  theme_luis() +
+  # new labesl
+  labs(x = "Difference in A variance between phenotypes", y = "NCP") +
+  theme(legend.position = "none")
+
+
+#+end_src
+
+#+RESULTS:
+[[file:graphs/power.png]]
+
+* System information
+
+#+begin_src R :results output :session :exports both
+sessionInfo()
+#+end_src
+
+#+results:
+#+begin_example
+r version 4.2.2 (2022-10-31)
+platform: x86_64-solus-linux-gnu (64-bit)
+running under: solus 4.4 harmony
+
+matrix products: default
+blas:   /usr/lib64/haswell/libopenblas_haswellp-r0.3.20.so
+lapack: /usr/lib64/r/lib/librlapack.so
+
+locale:
+ [1] lc_ctype=en_us.utf-8       lc_numeric=c
+ [3] lc_time=pt_br.utf-8        lc_collate=en_us.utf-8
+ [5] lc_monetary=pt_br.utf-8    lc_messages=en_us.utf-8
+ [7] lc_paper=pt_br.utf-8       lc_name=c
+ [9] lc_address=c               lc_telephone=c
+[11] lc_measurement=pt_br.utf-8 lc_identification=c
+
+attached base packages:
+[1] parallel  stats     graphics  grdevices utils     datasets  methods
+[8] base
+
+other attached packages:
+ [1] dtplyr_1.2.2           patchwork_1.1.2        ggrepel_0.9.2
+ [4] RColorBrewer_1.1-3     scales_1.2.1           doParallel_1.0.17
+ [7] iterators_1.0.14       foreach_1.5.2          akima_0.6-3.4
+[10] rgl_0.111.6            ggpubr_0.5.0           forcats_1.0.0
+[13] stringr_1.5.0          dplyr_1.1.2            purrr_1.0.1
+[16] readr_2.1.3            tidyr_1.3.0            tidyverse_1.3.2
+[19] knitr_1.41             lattice_0.20-45        plotly_4.10.1
+[22] ggplot2_3.4.0          MASS_7.3-58.1          umx_4.21.0
+[25] OpenMx_2.19.6-6        ProjectTemplate_0.10.2 tibble_3.2.1
+[28] digest_0.6.31
+
+loaded via a namespace (and not attached):
+ [1] nlme_3.1-160        fs_1.6.2            lubridate_1.9.0
+ [4] webshot_0.5.4       httr_1.4.4          rprojroot_2.0.3
+ [7] DiagrammeRsvg_0.1   tools_4.2.2         backports_1.4.1
+[10] utf8_1.2.2          R6_2.5.1            DBI_1.1.3
+[13] lazyeval_0.2.2      colorspace_2.0-3    sp_1.5-1
+[16] withr_2.5.0         tidyselect_1.2.0    curl_5.0.0
+[19] compiler_4.2.2      polycor_0.8-1       cli_3.6.0
+[22] rvest_1.0.3         xml2_1.3.3          labeling_0.4.2
+[25] systemfonts_1.0.4   rmarkdown_2.19      svglite_2.1.1
+[28] base64enc_0.1-3     pkgconfig_2.0.3     htmltools_0.5.4
+[31] MuMIn_1.47.1        dbplyr_2.2.1        fastmap_1.1.0
+[34] htmlwidgets_1.6.1   rlang_1.1.0         readxl_1.4.1
+[37] rstudioapi_0.14     farver_2.1.1        visNetwork_2.1.2
+[40] generics_0.1.3      jsonlite_1.8.4      car_3.1-1
+[43] googlesheets4_1.0.1 magrittr_2.0.3      kableExtra_1.3.4
+[46] Matrix_1.5-1        Rcpp_1.0.9          munsell_0.5.0
+[49] fansi_1.0.3         abind_1.4-5         lifecycle_1.0.3
+[52] stringi_1.7.12      carData_3.0-5       grid_4.2.2
+[55] crayon_1.5.2        haven_2.5.1         cowplot_1.1.1
+[58] hms_1.1.2           pillar_1.9.0        ggsignif_0.6.4
+[61] codetools_0.2-18    admisc_0.30         stats4_4.2.2
+[64] reprex_2.0.2        glue_1.6.2          evaluate_0.19
+[67] V8_4.2.2            data.table_1.14.6   RcppParallel_5.1.6
+[70] modelr_0.1.10       vctrs_0.6.1         tzdb_0.3.0
+[73] cellranger_1.1.0    gtable_0.3.1        assertthat_0.2.1
+[76] xfun_0.39           xtable_1.8-4        broom_1.0.2
+[79] rsvg_2.4.0          rstatix_0.7.1       googledrive_2.0.0
+[82] viridisLite_0.4.1   gargle_1.2.1        timechange_0.2.0
+[85] DiagrammeR_1.0.9    ellipsis_0.3.2      here_1.0.1
+#+end_example
